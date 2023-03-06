@@ -60,6 +60,7 @@ typedef struct {
     char *sub_protocol;
     char *user_agent;
     char *headers;
+    int http_status_code;
     bool propagate_control_frames;
     ws_transport_frame_state_t frame_state;
     esp_transport_handle_t parent;
@@ -122,6 +123,29 @@ static char *trimwhitespace(const char *str)
     *(end + 1) = 0;
 
     return (char *)str;
+}
+
+static int get_http_status_code(const char *buffer)
+{
+    const char *found = strcasestr(buffer, "HTTP/");
+    if (found) {
+        found += 5;
+        found = strstr(found, " ");
+        if (found) {
+            found++;
+            const char *found_end = strstr(found, " ");
+            if (found_end && (found_end - found == 3)) {
+                // copy status code to keep buffer unchanged
+                char code[4];
+                memcpy(code, found, found_end - found);
+                code[3] = 0;
+
+                return atoi(code);
+            }
+        }
+    }
+
+    return -1;
 }
 
 static char *get_http_header(const char *buffer, const char *key)
@@ -214,6 +238,13 @@ static int ws_connect(esp_transport_handle_t t, const char *host, int port, int 
         ws->buffer[header_len] = '\0';
         ESP_LOGD(TAG, "Read header chunk %d, current header size: %d", len, header_len);
     } while (NULL == strstr(ws->buffer, "\r\n\r\n") && header_len < WS_BUFFER_SIZE);
+
+    int status = get_http_status_code(ws->buffer);
+    if (status != WS_RESPONSE_OK) {
+        ws->http_status_code = status;
+        ESP_LOGE(TAG, "HTTP upgrade failed");
+        return -1;
+    }
 
     char *server_key = get_http_header(ws->buffer, "Sec-WebSocket-Accept:");
     if (server_key == NULL) {
@@ -605,7 +636,6 @@ esp_transport_handle_t esp_transport_ws_init(esp_transport_handle_t parent_handl
     ws->parent = parent_handle;
     t->foundation = parent_handle->foundation;
 
-
     ws->path = strdup("/");
     ESP_TRANSPORT_MEM_CHECK(TAG, ws->path, {
         free(ws);
@@ -715,6 +745,12 @@ esp_err_t esp_transport_ws_set_config(esp_transport_handle_t t, const esp_transp
     ws->propagate_control_frames = config->propagate_control_frames;
 
     return err;
+}
+
+int esp_transport_ws_get_http_status_code(esp_transport_handle_t t)
+{
+    transport_ws_t *ws = esp_transport_get_context_data(t);
+    return ws->http_status_code;
 }
 
 ws_transport_opcodes_t esp_transport_ws_get_read_opcode(esp_transport_handle_t t)
